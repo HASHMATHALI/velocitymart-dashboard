@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 from pathlib import Path
 
 # -------------------------------------------------
@@ -49,7 +48,7 @@ def load_data():
 
 
 # -------------------------------------------------
-# Sidebar
+# Sidebar Navigation
 # -------------------------------------------------
 st.sidebar.title("Navigation")
 page = st.sidebar.radio(
@@ -61,7 +60,7 @@ data = load_data()
 
 
 # =================================================
-# PAGE 1: Warehouse Health Overview (RESTORED)
+# PAGE 1: Warehouse Health Overview (STABLE)
 # =================================================
 if page == "Warehouse Health Overview":
 
@@ -80,27 +79,15 @@ if page == "Warehouse Health Overview":
     )
 
     st.markdown("---")
-
     st.markdown("###  Top 15 High-Risk SKUs")
 
-    top_risk = data.sort_values("priority_score", ascending=False).head(15)
-
-    fig = px.bar(
-        top_risk,
-        x="sku_id",
-        y="priority_score",
-        color="priority_score",
-        color_continuous_scale="Reds"
+    top_risk = (
+        data.sort_values("priority_score", ascending=False)
+        .head(15)
+        .set_index("sku_id")[["priority_score"]]
     )
 
-    fig.update_layout(
-        xaxis_title="SKU ID",
-        yaxis_title="Risk Score",
-        plot_bgcolor="#111111",
-        paper_bgcolor="#111111"
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
+    st.bar_chart(top_risk, height=400)
 
     st.markdown("### 📋 Detailed Risk Table")
     st.dataframe(
@@ -110,7 +97,7 @@ if page == "Warehouse Health Overview":
 
 
 # =================================================
-# PAGE 2: Temperature Compliance (100% FIXED)
+# PAGE 2: Temperature Compliance (BULLETPROOF)
 # =================================================
 elif page == "Temperature Compliance":
 
@@ -122,58 +109,28 @@ elif page == "Temperature Compliance":
         axis=1
     )
 
-    # -------- FORCE COUNTS --------
-    status_counts = pd.DataFrame({
-        "Status": ["Compliant", "Violation"],
-        "Count": [
-            (df["Status"] == "Compliant").sum(),
-            (df["Status"] == "Violation").sum()
-        ]
-    })
-
-    # -------- GUARANTEED VISIBLE BAR CHART --------
-    fig = px.bar(
-        status_counts,
-        x="Status",
-        y="Count",
-        color="Status",
-        text="Count",
-        color_discrete_map={
-            "Compliant": "#2ecc71",
-            "Violation": "#e74c3c"
-        }
+    # ---- Explicit aggregation ----
+    status_counts = (
+        df["Status"]
+        .value_counts()
+        .reindex(["Compliant", "Violation"], fill_value=0)
+        .to_frame("Number of SKUs")
     )
 
-    fig.update_traces(
-        textposition="outside",
-        width=0.6
-    )
+    st.markdown("### Temperature Compliance Status")
 
-    fig.update_layout(
-        title="Temperature Compliance Status",
-        xaxis_title="Status",
-        yaxis_title="Number of SKUs",
-        yaxis=dict(
-            range=[0, status_counts["Count"].max() * 1.3 + 1]
-        ),
-        plot_bgcolor="#111111",
-        paper_bgcolor="#111111",
-        font=dict(size=14)
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
+    # ---- STREAMLIT NATIVE BAR CHART (CAN'T FAIL) ----
+    st.bar_chart(status_counts, height=400)
 
     st.markdown("### ❌ SKUs with Temperature Violations")
-
     st.dataframe(
         df[df["Status"] == "Violation"],
         use_container_width=True
     )
 
-    csv = df.to_csv(index=False).encode("utf-8")
     st.download_button(
         "⬇ Download Compliance Report",
-        csv,
+        df.to_csv(index=False),
         "temperature_compliance_report.csv",
         "text/csv"
     )
