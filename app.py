@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
+import plotly.express as px
 from pathlib import Path
 
 # -------------------------------------------------
@@ -15,38 +15,57 @@ st.title("📦 VelocityMart – Warehouse Monitoring Dashboard")
 
 BASE_DIR = Path(__file__).parent
 
-
 # -------------------------------------------------
 # Load Data
 # -------------------------------------------------
 @st.cache_data
 def load_data():
-    sku = pd.read_csv(BASE_DIR / "sku_master_converted.xlsx.csv")
-    orders = pd.read_csv(BASE_DIR / "order_transactions_converted.xlsx.csv")
-    wh = pd.read_csv(BASE_DIR / "warehouse_constraints_converted.xlsx.csv")
+    try:
+        sku_master = pd.read_csv(BASE_DIR / "sku_master_converted.xlsx.csv")
+        orders = pd.read_csv(BASE_DIR / "order_transactions_converted.xlsx.csv")
+        warehouse = pd.read_csv(BASE_DIR / "warehouse_constraints_converted.xlsx.csv")
+    except Exception as e:
+        st.error(f"❌ File load error: {e}")
+        st.stop()
 
-    # Normalize temperature columns
-    sku["temp_req"] = sku["temp_req"].astype(str).str.strip().str.lower()
-    wh["temp_zone"] = wh["temp_zone"].astype(str).str.strip().str.lower()
+    # Validate columns
+    if not {"sku_id", "current_slot", "temp_req"}.issubset(sku_master.columns):
+        st.error("❌ sku_master missing required columns")
+        st.stop()
 
-    df = sku.merge(
-        wh[["slot_id", "temp_zone"]],
+    if not {"slot_id", "temp_zone"}.issubset(warehouse.columns):
+        st.error("❌ warehouse_constraints missing required columns")
+        st.stop()
+
+    # Merge temperature zones
+    df = sku_master.merge(
+        warehouse[["slot_id", "temp_zone"]],
         left_on="current_slot",
         right_on="slot_id",
         how="left"
     )
 
-    df.rename(columns={
-        "temp_req": "required_temp",
-        "temp_zone": "current_zone"
-    }, inplace=True)
+    df.rename(
+        columns={
+            "temp_req": "required_temp",
+            "temp_zone": "current_zone"
+        },
+        inplace=True
+    )
 
-    df["current_zone"] = df["current_zone"].fillna("unknown")
+    # Weekly picks
+    weekly_picks = orders.groupby("sku_id").size()
+    df["weekly_picks"] = df["sku_id"].map(weekly_picks).fillna(0)
 
-    weekly = orders.groupby("sku_id").size()
-    df["weekly_picks"] = df["sku_id"].map(weekly).fillna(0).astype(int)
+    # Risk scoring
+    df["days_at_risk"] = 3
+    df["priority_score"] = df["weekly_picks"] * df["days_at_risk"]
 
-    df["priority_score"] = df["weekly_picks"] * 3
+    # Compliance flag
+    df["status"] = df.apply(
+        lambda x: "Compliant" if x["required_temp"] == x["current_zone"] else "Violation",
+        axis=1
+    )
 
     return df
 
@@ -56,99 +75,97 @@ data = load_data()
 # -------------------------------------------------
 # Sidebar
 # -------------------------------------------------
+st.sidebar.title("Navigation")
 page = st.sidebar.radio(
-    "Navigation",
+    "Go to",
     ["Warehouse Health Overview", "Temperature Compliance"]
 )
 
-# -------------------------------------------------
-# PAGE 1
-# -------------------------------------------------
+# =================================================
+# PAGE 1: WAREHOUSE HEALTH OVERVIEW (FIXED)
+# =================================================
 if page == "Warehouse Health Overview":
 
-    st.subheader("📊 Warehouse Health Overview")
+    st.subheader("🏭 Warehouse Health Overview")
 
-    c1, c2, c3 = st.columns(3)
+    total_skus = len(data)
+    violations = (data["status"] == "Violation").sum()
+    compliant = (data["status"] == "Compliant").sum()
+    high_risk = (data["priority_score"] > data["priority_score"].median()).sum()
 
-    c1.metric("Total SKUs", int(len(data)))
-    c2.metric(
-        "Temperature Violations",
-        int((data["required_temp"] != data["current_zone"]).sum())
+    col1, col2, col3, col4 = st.columns(4)
+
+    col1.metric("Total SKUs", total_skus)
+    col2.metric("Compliant SKUs", compliant)
+    col3.metric("Violations", violations)
+    col4.metric("High-Risk SKUs", high_risk)
+
+    st.markdown("---")
+
+    # 🔴 High-risk SKUs chart
+    st.markdown("### 🔴 Top 15 High-Risk SKUs")
+
+    top_risk = data.sort_values("priority_score", ascending=False).head(15)
+
+    fig_risk = px.bar(
+        top_risk,
+        x="sku_id",
+        y="priority_score",
+        color="priority_score",
+        color_continuous_scale="Reds",
+        labels={"sku_id": "SKU", "priority_score": "Risk Score"}
     )
-    c3.metric(
-        "High Risk SKUs",
-        int((data["priority_score"] > data["priority_score"].median()).sum())
-    )
 
+    st.plotly_chart(fig_risk, use_container_width=True)
+
+    # 📋 Detailed table
+    st.markdown("### 📋 SKU Risk Details")
     st.dataframe(
         data.sort_values("priority_score", ascending=False),
         use_container_width=True
     )
 
-
-# -------------------------------------------------
-# PAGE 2 — GUARANTEED GRAPH
-# -------------------------------------------------
-else:
+# =================================================
+# PAGE 2: TEMPERATURE COMPLIANCE (KEEP WORKING)
+# =================================================
+elif page == "Temperature Compliance":
 
     st.subheader("🌡 Temperature Compliance Analysis")
 
-    data["status"] = [
-        "Compliant" if r == c else "Violation"
-        for r, c in zip(data["required_temp"], data["current_zone"])
-    ]
+    status_counts = data["status"].value_counts().reset_index()
+    status_counts.columns = ["Status", "Count"]
 
-    compliant_count = int((data["status"] == "Compliant").sum())
-    violation_count = int((data["status"] == "Violation").sum())
-
-    # 🚨 HARD GUARANTEE DATA
-    status_labels = ["Compliant", "Violation"]
-    status_values = [compliant_count, violation_count]
-
-    # DEBUG — YOU WILL SEE NUMBERS
-    st.info(f"Compliant: {compliant_count} | Violations: {violation_count}")
-
-    fig = go.Figure()
-
-    fig.add_bar(
-        x=status_labels,
-        y=status_values,
-        marker_color=["#2ecc71", "#e74c3c"],
-        text=status_values,
-        textposition="outside"
+    fig_pie = px.pie(
+        status_counts,
+        names="Status",
+        values="Count",
+        color="Status",
+        color_discrete_map={
+            "Compliant": "green",
+            "Violation": "red"
+        },
+        title="Temperature Compliance Status"
     )
 
-    fig.update_layout(
-        title="Temperature Compliance Status",
-        xaxis_title="Status",
-        yaxis_title="Number of SKUs",
-        yaxis=dict(
-            range=[0, max(5, max(status_values) + 5)]
-        ),
-        bargap=0.4,
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(size=14)
-    )
+    st.plotly_chart(fig_pie, use_container_width=True)
 
-    st.plotly_chart(fig, use_container_width=True)
-
-    st.markdown("### ❌ Violating SKUs")
+    st.markdown("### ❌ Temperature Violations")
     st.dataframe(
         data[data["status"] == "Violation"],
         use_container_width=True
     )
 
+    # Download report
+    csv = data.to_csv(index=False).encode("utf-8")
     st.download_button(
         "⬇ Download Compliance Report",
-        data.to_csv(index=False),
-        "temperature_compliance_report.csv"
+        csv,
+        "temperature_compliance_report.csv",
+        "text/csv"
     )
 
-
+# -------------------------------------------------
+# Footer
+# -------------------------------------------------
 st.markdown("---")
-st.caption("VelocityMart Analytics Dashboard | Production-ready Streamlit App 🚀")
-
-
-
-
+st.caption("VelocityMart Warehouse Analytics Dashboard | Streamlit 🚀")
