@@ -81,7 +81,7 @@ if page == "Warehouse Health Overview":
 
     st.markdown("---")
 
-    st.markdown("### 🔥 Top 15 High-Risk SKUs")
+    st.markdown("###  Top 15 High-Risk SKUs")
 
     top_risk = data.sort_values("priority_score", ascending=False).head(15)
 
@@ -184,3 +184,4 @@ elif page == "Temperature Compliance":
 # -------------------------------------------------
 st.markdown("---")
 st.caption("VelocityMart Warehouse Dashboard | Built with Streamlit 🚀")
+
