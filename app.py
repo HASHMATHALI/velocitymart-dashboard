@@ -4,7 +4,7 @@ import plotly.express as px
 from pathlib import Path
 
 # -------------------------------------------------
-# App Configuration
+# App Config
 # -------------------------------------------------
 st.set_page_config(
     page_title="VelocityMart Warehouse Dashboard",
@@ -21,35 +21,23 @@ BASE_DIR = Path(__file__).parent
 # -------------------------------------------------
 @st.cache_data
 def load_data():
-    try:
-        sku_master = pd.read_csv(BASE_DIR / "sku_master_converted.xlsx.csv")
-        orders = pd.read_csv(BASE_DIR / "order_transactions_converted.xlsx.csv")
-        warehouse = pd.read_csv(BASE_DIR / "warehouse_constraints_converted.xlsx.csv")
-    except Exception as e:
-        st.error(f"❌ File load error: {e}")
-        st.stop()
+    sku_master = pd.read_csv(BASE_DIR / "sku_master_converted.xlsx.csv")
+    orders = pd.read_csv(BASE_DIR / "order_transactions_converted.xlsx.csv")
+    warehouse = pd.read_csv(BASE_DIR / "warehouse_constraints_converted.xlsx.csv")
 
-    # Validate columns
-    required_sku_cols = {"sku_id", "current_slot", "temp_req"}
-    required_wh_cols = {"slot_id", "temp_zone"}
-
-    if not required_sku_cols.issubset(sku_master.columns):
-        st.error("❌ sku_master file missing required columns")
-        st.stop()
-
-    if not required_wh_cols.issubset(warehouse.columns):
-        st.error("❌ warehouse_constraints file missing required columns")
-        st.stop()
+    # Normalize text columns (CRITICAL FIX)
+    sku_master["temp_req"] = sku_master["temp_req"].astype(str).str.strip().str.lower()
+    warehouse["temp_zone"] = warehouse["temp_zone"].astype(str).str.strip().str.lower()
 
     # Merge temperature zones
-    temp_df = sku_master.merge(
+    df = sku_master.merge(
         warehouse[["slot_id", "temp_zone"]],
         left_on="current_slot",
         right_on="slot_id",
         how="left"
     )
 
-    temp_df.rename(
+    df.rename(
         columns={
             "temp_req": "required_temp",
             "temp_zone": "current_zone"
@@ -57,57 +45,53 @@ def load_data():
         inplace=True
     )
 
+    # Handle missing zones
+    df["current_zone"] = df["current_zone"].fillna("unknown")
+
     # Weekly pick count
     weekly_picks = orders.groupby("sku_id").size()
-    temp_df["weekly_picks"] = temp_df["sku_id"].map(weekly_picks).fillna(0)
+    df["weekly_picks"] = df["sku_id"].map(weekly_picks).fillna(0)
 
-    # Risk calculation
-    temp_df["days_at_risk"] = 3
-    temp_df["priority_score"] = temp_df["weekly_picks"] * temp_df["days_at_risk"]
+    # Risk score
+    df["priority_score"] = df["weekly_picks"] * 3
 
-    return temp_df
+    return df
 
+
+data = load_data()
 
 # -------------------------------------------------
-# Sidebar Navigation
+# Sidebar
 # -------------------------------------------------
-st.sidebar.title("Navigation")
 page = st.sidebar.radio(
-    "Go to",
+    "Navigation",
     ["Warehouse Health Overview", "Temperature Compliance"]
 )
 
 # -------------------------------------------------
-# Load Dataset
-# -------------------------------------------------
-data = load_data()
-
-
-# -------------------------------------------------
-# PAGE 1: Warehouse Health Overview
+# PAGE 1
 # -------------------------------------------------
 if page == "Warehouse Health Overview":
 
     st.subheader("📊 Warehouse Health Overview")
 
-    col1, col2, col3 = st.columns(3)
+    c1, c2, c3 = st.columns(3)
 
-    with col1:
+    with c1:
         st.metric("Total SKUs", len(data))
 
-    with col2:
-        mismatched = (data["required_temp"] != data["current_zone"]).sum()
-        st.metric("Temperature Mismatches", mismatched)
+    with c2:
+        st.metric(
+            "Temperature Violations",
+            (data["required_temp"] != data["current_zone"]).sum()
+        )
 
-    with col3:
+    with c3:
         st.metric(
             "High Risk SKUs",
             (data["priority_score"] > data["priority_score"].median()).sum()
         )
 
-    st.markdown("---")
-
-    # Priority chart
     fig = px.bar(
         data.sort_values("priority_score", ascending=False).head(15),
         x="sku_id",
@@ -118,36 +102,36 @@ if page == "Warehouse Health Overview":
     )
 
     st.plotly_chart(fig, use_container_width=True)
-
-    st.markdown("### 📋 SKU Risk Table")
-    st.dataframe(
-        data.sort_values("priority_score", ascending=False),
-        use_container_width=True
-    )
+    st.dataframe(data.sort_values("priority_score", ascending=False))
 
 
 # -------------------------------------------------
-# PAGE 2: Temperature Compliance (FIXED)
+# PAGE 2 (FULLY FIXED)
 # -------------------------------------------------
-elif page == "Temperature Compliance":
+else:
 
     st.subheader("🌡 Temperature Compliance Analysis")
 
     compliance_df = data.copy()
     compliance_df["status"] = compliance_df.apply(
-        lambda x: "Compliant" if x["required_temp"] == x["current_zone"] else "Violation",
+        lambda x: "Compliant"
+        if x["required_temp"] == x["current_zone"]
+        else "Violation",
         axis=1
     )
 
-    # ---------- FIXED BAR CHART ----------
-    status_counts = (
-        compliance_df["status"]
-        .value_counts()
-        .reindex(["Compliant", "Violation"], fill_value=0)
-        .reset_index()
-    )
+    # COUNT STATUS (FORCE BOTH VALUES)
+    status_counts = pd.DataFrame({
+        "Status": ["Compliant", "Violation"],
+        "Count": [
+            (compliance_df["status"] == "Compliant").sum(),
+            (compliance_df["status"] == "Violation").sum()
+        ]
+    })
 
-    status_counts.columns = ["Status", "Count"]
+    # DEBUG (YOU CAN REMOVE LATER)
+    st.caption("🔍 Debug Counts")
+    st.write(status_counts)
 
     fig = px.bar(
         status_counts,
@@ -162,39 +146,26 @@ elif page == "Temperature Compliance":
         }
     )
 
-    fig.update_traces(
-        textposition="outside",
-        marker_line_width=1.5
-    )
-
+    fig.update_traces(textposition="outside")
     fig.update_layout(
         yaxis_title="Number of SKUs",
         yaxis=dict(range=[0, max(1, status_counts["Count"].max() + 5)]),
-        xaxis_title="Status",
         plot_bgcolor="rgba(0,0,0,0)"
     )
 
     st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("### ❌ Temperature Violations")
-    st.dataframe(
-        compliance_df[compliance_df["status"] == "Violation"],
-        use_container_width=True
-    )
+    st.markdown("### ❌ Violating SKUs")
+    st.dataframe(compliance_df[compliance_df["status"] == "Violation"])
 
-    # Download report
-    csv = compliance_df.to_csv(index=False).encode("utf-8")
     st.download_button(
         "⬇ Download Compliance Report",
-        csv,
-        "temperature_compliance_report.csv",
-        "text/csv"
+        compliance_df.to_csv(index=False),
+        "temperature_compliance_report.csv"
     )
 
 
-# -------------------------------------------------
-# Footer
-# -------------------------------------------------
 st.markdown("---")
-st.caption("VelocityMart Analytics Dashboard | Built with Streamlit 🚀")
+st.caption("VelocityMart Analytics Dashboard | Streamlit 🚀")
+
 
