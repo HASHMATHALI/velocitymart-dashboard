@@ -4,7 +4,7 @@ import plotly.express as px
 from pathlib import Path
 
 # -------------------------------------------------
-# App Config
+# App Configuration
 # -------------------------------------------------
 st.set_page_config(
     page_title="VelocityMart Warehouse Dashboard",
@@ -13,7 +13,6 @@ st.set_page_config(
 
 st.title("📦 VelocityMart – Warehouse Monitoring Dashboard")
 
-# Base directory (works locally + Streamlit Cloud)
 BASE_DIR = Path(__file__).parent
 
 
@@ -30,16 +29,16 @@ def load_data():
         st.error(f"❌ File load error: {e}")
         st.stop()
 
-    # Required column checks
+    # Validate columns
     required_sku_cols = {"sku_id", "current_slot", "temp_req"}
     required_wh_cols = {"slot_id", "temp_zone"}
 
     if not required_sku_cols.issubset(sku_master.columns):
-        st.error("❌ sku_master file is missing required columns")
+        st.error("❌ sku_master file missing required columns")
         st.stop()
 
     if not required_wh_cols.issubset(warehouse.columns):
-        st.error("❌ warehouse_constraints file is missing required columns")
+        st.error("❌ warehouse_constraints file missing required columns")
         st.stop()
 
     # Merge temperature zones
@@ -62,7 +61,7 @@ def load_data():
     weekly_picks = orders.groupby("sku_id").size()
     temp_df["weekly_picks"] = temp_df["sku_id"].map(weekly_picks).fillna(0)
 
-    # Risk scoring
+    # Risk calculation
     temp_df["days_at_risk"] = 3
     temp_df["priority_score"] = temp_df["weekly_picks"] * temp_df["days_at_risk"]
 
@@ -97,30 +96,30 @@ if page == "Warehouse Health Overview":
         st.metric("Total SKUs", len(data))
 
     with col2:
-        mismatches = (data["required_temp"] != data["current_zone"]).sum()
-        st.metric("Temperature Mismatches", mismatches)
+        mismatched = (data["required_temp"] != data["current_zone"]).sum()
+        st.metric("Temperature Mismatches", mismatched)
 
     with col3:
         st.metric(
-            "High-Risk SKUs",
+            "High Risk SKUs",
             (data["priority_score"] > data["priority_score"].median()).sum()
         )
 
     st.markdown("---")
 
-    # High-risk SKU chart
+    # Priority chart
     fig = px.bar(
         data.sort_values("priority_score", ascending=False).head(15),
         x="sku_id",
         y="priority_score",
-        color="priority_score",
         title="Top 15 High-Risk SKUs",
+        color="priority_score",
         color_continuous_scale="Reds"
     )
 
     st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("### 📋 SKU Risk Details")
+    st.markdown("### 📋 SKU Risk Table")
     st.dataframe(
         data.sort_values("priority_score", ascending=False),
         use_container_width=True
@@ -128,7 +127,7 @@ if page == "Warehouse Health Overview":
 
 
 # -------------------------------------------------
-# PAGE 2: Temperature Compliance
+# PAGE 2: Temperature Compliance (FIXED)
 # -------------------------------------------------
 elif page == "Temperature Compliance":
 
@@ -136,19 +135,18 @@ elif page == "Temperature Compliance":
 
     compliance_df = data.copy()
     compliance_df["status"] = compliance_df.apply(
-        lambda x: "Compliant"
-        if x["required_temp"] == x["current_zone"]
-        else "Violation",
+        lambda x: "Compliant" if x["required_temp"] == x["current_zone"] else "Violation",
         axis=1
     )
 
-    # ---- FIXED & ROBUST STATUS COUNT ----
+    # ---------- FIXED BAR CHART ----------
     status_counts = (
         compliance_df["status"]
         .value_counts()
         .reindex(["Compliant", "Violation"], fill_value=0)
         .reset_index()
     )
+
     status_counts.columns = ["Status", "Count"]
 
     fig = px.bar(
@@ -159,13 +157,22 @@ elif page == "Temperature Compliance":
         title="Temperature Compliance Status",
         color="Status",
         color_discrete_map={
-            "Compliant": "green",
-            "Violation": "red"
+            "Compliant": "#2ecc71",
+            "Violation": "#e74c3c"
         }
     )
 
-    fig.update_traces(textposition="outside")
-    fig.update_layout(yaxis_title="Number of SKUs")
+    fig.update_traces(
+        textposition="outside",
+        marker_line_width=1.5
+    )
+
+    fig.update_layout(
+        yaxis_title="Number of SKUs",
+        yaxis=dict(range=[0, max(1, status_counts["Count"].max() + 5)]),
+        xaxis_title="Status",
+        plot_bgcolor="rgba(0,0,0,0)"
+    )
 
     st.plotly_chart(fig, use_container_width=True)
 
