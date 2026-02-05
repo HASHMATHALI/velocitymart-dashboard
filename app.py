@@ -1,40 +1,48 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 from pathlib import Path
-from datetime import datetime
 
-# ---------------- CONFIG ----------------
+# -------------------------------------------------
+# App Config
+# -------------------------------------------------
 st.set_page_config(
     page_title="VelocityMart Warehouse Dashboard",
-    page_icon="📦",
     layout="wide"
 )
 
+st.title("📦 VelocityMart – Warehouse Monitoring Dashboard")
+
+# Base directory (works locally + Streamlit Cloud)
 BASE_DIR = Path(__file__).parent
 
-# ---------------- DATA LOADING ----------------
+
+# -------------------------------------------------
+# Load Data
+# -------------------------------------------------
 @st.cache_data
 def load_data():
     try:
-        sku_master = pd.read_excel(BASE_DIR / "sku_master_converted.xlsx.csv")
-        orders = pd.read_excel(BASE_DIR / "order_transactions_converted.xlsx.csv")
-        warehouse = pd.read_excel(BASE_DIR / "warehouse_constraints_converted.xlsx")
+        sku_master = pd.read_csv(BASE_DIR / "sku_master_converted.xlsx.csv")
+        orders = pd.read_csv(BASE_DIR / "order_transactions_converted.xlsx.csv")
+        warehouse = pd.read_csv(BASE_DIR / "warehouse_constraints_converted.xlsx.csv")
     except Exception as e:
         st.error(f"❌ File load error: {e}")
         st.stop()
 
-    # Required columns check
-    if not {"sku_id", "current_slot", "temp_req"}.issubset(sku_master.columns):
-        st.error("sku_master file missing required columns")
+    # Column validation
+    required_sku_cols = {"sku_id", "current_slot", "temp_req"}
+    required_wh_cols = {"slot_id", "temp_zone"}
+
+    if not required_sku_cols.issubset(sku_master.columns):
+        st.error("❌ sku_master file missing required columns")
         st.stop()
 
-    if not {"slot_id", "temp_zone"}.issubset(warehouse.columns):
-        st.error("warehouse_constraints file missing required columns")
+    if not required_wh_cols.issubset(warehouse.columns):
+        st.error("❌ warehouse_constraints file missing required columns")
         st.stop()
 
-    # Merge temperature info
+    # Merge temperature zones
     temp_df = sku_master.merge(
         warehouse[["slot_id", "temp_zone"]],
         left_on="current_slot",
@@ -50,87 +58,120 @@ def load_data():
         inplace=True
     )
 
-    temp_df["weekly_picks"] = (
-        orders.groupby("sku_id").size()
-        .reindex(temp_df["sku_id"])
-        .fillna(0)
-        .values
-    )
+    # Weekly pick count
+    weekly_picks = orders.groupby("sku_id").size()
+    temp_df["weekly_picks"] = temp_df["sku_id"].map(weekly_picks).fillna(0)
 
+    # Risk calculation
     temp_df["days_at_risk"] = 3
     temp_df["priority_score"] = temp_df["weekly_picks"] * temp_df["days_at_risk"]
 
     return temp_df
 
-# ---------------- CHAOS SCORE ----------------
-def chaos_score():
-    return 15.8
 
-# ---------------- SIDEBAR ----------------
+# -------------------------------------------------
+# Sidebar Navigation
+# -------------------------------------------------
+st.sidebar.title("Navigation")
 page = st.sidebar.radio(
-    "Navigation",
+    "Go to",
     ["Warehouse Health Overview", "Temperature Compliance"]
 )
 
-temperature = load_data()
+# -------------------------------------------------
+# Load Dataset
+# -------------------------------------------------
+data = load_data()
 
-# ================= PAGE 1 =================
+
+# -------------------------------------------------
+# PAGE 1: Warehouse Health Overview
+# -------------------------------------------------
 if page == "Warehouse Health Overview":
-    st.title("🏭 Warehouse Health Overview")
 
-    col1, col2, col3 = st.columns([1, 2, 1])
+    st.subheader("📊 Warehouse Health Overview")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.metric("Total SKUs", len(data))
+
     with col2:
-        fig = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=chaos_score(),
-            title={"text": "Warehouse Chaos Score"},
-            gauge={
-                "axis": {"range": [0, 100]},
-                "steps": [
-                    {"range": [0, 10], "color": "green"},
-                    {"range": [10, 20], "color": "yellow"},
-                    {"range": [20, 30], "color": "orange"},
-                    {"range": [30, 100], "color": "red"},
-                ],
-            }
-        ))
-        st.plotly_chart(fig, use_container_width=True)
+        mismatched = (data["required_temp"] != data["current_zone"]).sum()
+        st.metric("Temp Mismatches", mismatched)
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Fulfillment Time", "6.2 min", "+2.4")
-    c2.metric("Spoilage Risk", "$16,900", "338 SKUs")
-    c3.metric("Collision Exposure", "31,072", "+10 windows")
+    with col3:
+        st.metric(
+            "High Risk SKUs",
+            (data["priority_score"] > data["priority_score"].median()).sum()
+        )
 
-# ================= PAGE 2 =================
-elif page == "Temperature Compliance":
-    st.title("🌡️ Temperature Compliance")
+    st.markdown("---")
 
-    matrix = temperature.pivot_table(
-        index="required_temp",
-        columns="current_zone",
-        values="sku_id",
-        aggfunc="count",
-        fill_value=0
+    # Priority chart
+    fig = px.bar(
+        data.sort_values("priority_score", ascending=False).head(15),
+        x="sku_id",
+        y="priority_score",
+        title="Top 15 High-Risk SKUs",
+        color="priority_score",
+        color_continuous_scale="Reds"
     )
 
-    fig = px.imshow(
-        matrix,
-        text_auto=True,
-        color_continuous_scale="RdYlGn_r",
-        labels=dict(x="Current Zone", y="Required Temp", color="SKU Count")
-    )
     st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("Priority SKU List")
+    st.markdown("### 📋 SKU Risk Table")
     st.dataframe(
-        temperature.sort_values("priority_score", ascending=False),
+        data.sort_values("priority_score", ascending=False),
         use_container_width=True
     )
 
-    st.download_button(
-        "⬇️ Export CSV",
-        temperature.to_csv(index=False),
-        "temperature_relocation_plan.csv"
+
+# -------------------------------------------------
+# PAGE 2: Temperature Compliance
+# -------------------------------------------------
+elif page == "Temperature Compliance":
+
+    st.subheader("🌡 Temperature Compliance Analysis")
+
+    compliance_df = data.copy()
+    compliance_df["status"] = compliance_df.apply(
+        lambda x: "Compliant" if x["required_temp"] == x["current_zone"] else "Mismatch",
+        axis=1
     )
 
-    st.caption(f"Last updated: {datetime.now().strftime('%d %b %Y %H:%M')}")
+    fig = px.pie(
+        compliance_df,
+        names="status",
+        title="Temperature Compliance Status",
+        color="status",
+        color_discrete_map={
+            "Compliant": "green",
+            "Mismatch": "red"
+        }
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("### ❌ Temperature Mismatches")
+    st.dataframe(
+        compliance_df[compliance_df["status"] == "Mismatch"],
+        use_container_width=True
+    )
+
+    # Download
+    csv = compliance_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "⬇ Download Compliance Report",
+        csv,
+        "temperature_compliance_report.csv",
+        "text/csv"
+    )
+
+
+# -------------------------------------------------
+# Footer
+# -------------------------------------------------
+st.markdown("---")
+st.caption("VelocityMart Analytics Dashboard | Built with Streamlit 🚀")
+
